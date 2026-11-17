@@ -50,3 +50,12 @@ Based on upstream commit 25e56eb.
 - Real-world power-cut restore test result: pending.
 - ESPHome considered: Zigbee support immature, Wi-Fi OTA only, not better for offline.
 - Possible upstream issue: missing cluster/attribute `name`, `write:true`, COOL->WARM check.
+
+## OTA via GitHub (set up 2026-11-17)
+- Repo workflow builds on tag push (e.g. `git tag v0.1.0 && git push origin v0.1.0`) and publishes `skyfan-zigbee.ota`
+  as a release asset; it then appends the entry to `zigbee2mqtt/ota-index.json` automatically.
+- Upstream's index entries were removed from this repo's index so Z2M never offers upstream 2.0.0 (would overwrite these fixes).
+- Z2M config: `ota: zigbee_ota_override_index_location: https://raw.githubusercontent.com/stenve11/Skyfan-zigbee-personal/main/zigbee2mqtt/ota-index.json`
+- Repo must be PUBLIC for Z2M to download without a login.
+- Tag versions map to OTA numbers (v0.1.0 = 4321280) - always higher than the early local test builds (1-9).
+- Workflow pinned to esp32 core 3.3.12 to match local builds.
