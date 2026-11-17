@@ -33,6 +33,10 @@ class SkyfanZigbeeFanControl : public ZigbeeEP {
 private:
   void (*fanDirectionCallback)(uint8_t direction) = nullptr;
   void (*fanModeCallback)(ZigbeeFanMode mode) = nullptr;
+  void (*fanSpeedCallback)(uint8_t speed) = nullptr;
+  void (*powerOnCallback)(uint8_t which, uint8_t value) = nullptr;  // which: 0 = light, 1 = fan
+  uint8_t _initialPowerOnLight = 0;
+  uint8_t _initialPowerOnFan = 0;
   esp_zb_attribute_list_t *customCluster = nullptr;
   bool customClusterRegistered = false;
 
@@ -43,6 +47,9 @@ private:
   // Confirmed state (last value acknowledged by MCU)
   ZigbeeFanMode confirmedFanMode = FAN_MODE_OFF;
   uint8_t confirmedFanDirection = static_cast<uint8_t>(FanDirection::FORWARD);
+  uint8_t confirmedFanSpeed = 0;
+  bool _fanPowerOn = false;       // last power state reported by the MCU
+  uint8_t _lastMcuSpeed = 1;      // last non-zero speed reported by the MCU
 
 public:
   SkyfanZigbeeFanControl(uint8_t endpoint);
@@ -55,6 +62,13 @@ public:
 
   // Set callback for fan mode changes from Zigbee
   void onFanModeChange(void (*callback)(ZigbeeFanMode mode));
+
+  // Set callback for exact fan speed (0-5) changes from Zigbee
+  void onFanSpeedChange(void (*callback)(uint8_t speed));
+
+  // Power-on behaviour settings (0 default, 1 previous, 2 on, 3 off): starting values, and a callback for changes from Zigbee
+  void setInitialPowerOn(uint8_t light, uint8_t fan);   // call before createCustomCluster()
+  void onPowerOnChange(void (*callback)(uint8_t which, uint8_t value));
 
   // Get current fan mode
   ZigbeeFanMode getFanMode() const { return _current_fan_mode; }
@@ -73,6 +87,10 @@ public:
   // Custom cluster attribute methods for fan direction
   bool setFanDirection(uint8_t direction);
   uint8_t getFanDirection() const;
+
+  // Custom cluster attribute methods for exact fan speed (0 = off, 1-5)
+  bool setFanSpeedAttribute(uint8_t speed);
+  uint8_t getFanSpeedAttribute() const;
   
   // Create and register manufacturer-specific cluster for fan direction
   bool createCustomCluster();
@@ -95,6 +113,7 @@ public:
   // Report attribute values to coordinator
   bool reportFanMode();
   bool reportFanDirection();
+  bool reportFanSpeed();
   void reportAllAttributes();
 
   // Confirmed state management (called when MCU confirms via status report)
@@ -102,11 +121,14 @@ public:
   void confirmFanDirection(uint8_t direction);
   ZigbeeFanMode getConfirmedFanMode() const;
   uint8_t getConfirmedFanDirection() const;
+  void confirmFanSpeed(uint8_t speed);
+  uint8_t getConfirmedFanSpeed() const;
 
   // Rollback to confirmed state and report to coordinator
   void rollback();          // Rolls back all attributes (fan mode + direction)
   void rollbackFanMode();   // Rolls back fan mode only
   void rollbackFanDirection();  // Rolls back fan direction only
+  void rollbackFanSpeed();      // Rolls back exact fan speed only
 
   // Handle MCU status updates (validates, updates Zigbee attributes, confirms state, reports)
   void handleStatusUpdate(uint8_t dpid, uint32_t value);

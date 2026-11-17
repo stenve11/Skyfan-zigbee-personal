@@ -41,7 +41,7 @@
 //
 // Examples: dev build 50 = 0x00000032, v0.0.4-alpha.1 = 0x00081000, v1.0.0 = 0x0800F000
 #ifndef OTA_FILE_VERSION
-#define OTA_FILE_VERSION 0x00000001  // Fallback for local builds (dev build 1)
+#define OTA_FILE_VERSION 0x00000009  // Fallback for local builds - raise for every OTA you build
 #endif
 #define OTA_DOWNLOADED_FILE_VERSION OTA_FILE_VERSION  // Initially same as running version
 #define OTA_HW_VERSION              0x0001            // Hardware revision (increment for breaking HW changes)
@@ -72,6 +72,9 @@ inline bool isLightModel(const char* productId) {
 #define VENTAIR_CUSTOM_CLUSTER_ID      0xFC00  // Custom cluster ID. Made up but must be > ESP_ZB_CUSTOM_CLUSTER_ID_MIN_VAL
 #define FLS_MANUFACTURER_CODE          0x1818  // Front Left Speaker manufacturer code. Again made up. Meant to be registered
 #define CUSTOM_ATTR_FAN_DIRECTION      0x0001  // Custom attribute ID for fan direction
+#define CUSTOM_ATTR_FAN_SPEED          0x0002  // Custom attribute ID for exact fan speed (0 = off, 1-5)
+#define CUSTOM_ATTR_POWER_ON_LIGHT     0x0003  // Power-on behaviour of the light (0 default, 1 previous, 2 on, 3 off)
+#define CUSTOM_ATTR_POWER_ON_FAN       0x0004  // Power-on behaviour of the fan (same values)
 
 // === ZCL Frame Control Bytes (for raw APS reporting) ===
 #define ZCL_FRAME_CTRL_GLOBAL_TO_CLIENT          0x18  // Global cmd, server-to-client, disable default response
@@ -83,6 +86,7 @@ inline bool isLightModel(const char* productId) {
 #define TUYA_CONNECTION_TIMEOUT_MS     30000  // 30 seconds
 #define TUYA_COMMAND_TIMEOUT_MS        500    // 0.5 seconds - ACK timeout
 #define TUYA_STATUS_RESPONSE_TIMEOUT_MS 1500  // 1500ms - Status report timeout
+#define TUYA_STATE_POLL_INTERVAL_MS    0      // Ask the MCU for its full state this often (0 = off), so remote-control changes are noticed
 #define TUYA_INTER_COMMAND_DELAY_MS    10     // 10ms minimum gap between commands
 #define ZIGBEE_CONNECTION_POLL_MS      100    // 100ms
 #define FACTORY_RESET_DELAY_MS         1000   // 1 second
@@ -94,6 +98,32 @@ inline bool isLightModel(const char* productId) {
 // Note: Uses TUYA_COMMAND_TIMEOUT_MS (500ms) for response timeout per Tuya spec
 
 
+
+// === Power-on behaviour ===
+// What the stick does when the fan loses and regains power. The fan's own controller always starts with the
+// fan stopped and the light on at its own default brightness and colour temperature.
+#define POWER_ON_DEFAULT   0   // leave it as the fan's controller starts
+#define POWER_ON_PREVIOUS  1   // put it back as it was before the power cut
+#define POWER_ON_ON        2   // light: on at the previous brightness/colour; fan: running at the previous speed
+#define POWER_ON_OFF       3   // turn it off
+
+// These two are only the starting values; once changed from Zigbee2MQTT the stick remembers the new setting.
+#define POWER_ON_LIGHT_MODE       POWER_ON_PREVIOUS   // one of the four values above
+#define POWER_ON_FAN_MODE         POWER_ON_DEFAULT    // DEFAULT keeps the fan stopped after an outage
+#define POWER_ON_RESTORE_DELAY_MS 3000                // wait this long after boot so the fan's controller is ready
+#define POWER_ON_SAVE_DELAY_MS    10000               // save a change to flash once nothing has changed for this long
+
+// Snapshot of the fan and light, kept in flash for the power-on behaviour above
+struct PowerSnapshot {
+  uint8_t version;          // 0 = nothing saved
+  uint8_t valid;            // bit 0: light values are known, bit 1: fan values are known
+  uint8_t lightOn;
+  uint8_t lightBrightness;  // 1-5
+  uint8_t lightTemp;        // 0-2 (ColourTempLevel)
+  uint8_t fanOn;
+  uint8_t fanSpeed;         // 1-5
+  uint8_t fanDirection;     // 0 = forward, 1 = reverse
+};
 
 // === Colour Temperature Configuration ===
 // Kelvin values for each temperature setting
@@ -250,9 +280,10 @@ inline uint16_t tuyaColourTempToKelvin(ColourTempLevel colourTemp) {
 // === Range Mapping Functions ===
 
 // Map Zigbee brightness to Tuya brightness with validation
+// Rounds to nearest so that each level's own reported Zigbee value maps back to the same level
 inline uint8_t zigbeeBrightnessToTuya(uint8_t zigbeeBrightness) {
   uint8_t clamped = clamp(zigbeeBrightness, static_cast<uint8_t>(ZIGBEE_BRIGHTNESS_MIN), static_cast<uint8_t>(ZIGBEE_BRIGHTNESS_MAX));
-  return map(clamped, ZIGBEE_BRIGHTNESS_MIN, ZIGBEE_BRIGHTNESS_MAX, TUYA_BRIGHTNESS_MIN, TUYA_BRIGHTNESS_MAX);
+  return (uint8_t)(((uint16_t)clamped * TUYA_BRIGHTNESS_MAX + ZIGBEE_BRIGHTNESS_MAX / 2) / ZIGBEE_BRIGHTNESS_MAX);
 }
 
 // Map Tuya brightness to Zigbee brightness with validation
