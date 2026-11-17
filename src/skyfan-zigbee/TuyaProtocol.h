@@ -227,6 +227,7 @@ public:
   void processQueue();
   void clearQueue();
   bool isQueueEmpty() const;
+  bool isIdle() const { return queueCount == 0 && queueState == CommandQueueState::IDLE; }  // nothing queued or awaiting status
   uint8_t getQueueCount() const;
 
   // Status matching for queue (called from processResponse)

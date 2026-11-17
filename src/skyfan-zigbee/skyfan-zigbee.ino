@@ -29,10 +29,13 @@
 #include "LedIndicator.h"
 #include "ButtonHandler.h"
 #include "Logger.h"
+#include "PowerOnRestore.h"
 #include <HardwareSerial.h>
 
-#ifdef RGB_BUILTIN
+#if defined(RGB_BUILTIN)
 uint8_t led = RGB_BUILTIN;
+#elif defined(LED_BUILTIN)
+uint8_t led = LED_BUILTIN;   // XIAO ESP32C6 user LED (GPIO15, likely active-low)
 #else
 uint8_t led = 2;
 #endif
@@ -47,6 +50,7 @@ SkyfanZigbeeFanControl zbFanControl = SkyfanZigbeeFanControl(ZIGBEE_FAN_CONTROL_
 SkyfanZigbeeLight zbLight = SkyfanZigbeeLight(ZIGBEE_LIGHT_CONTROL_ENDPOINT);
 TuyaProtocol tuya(&tuyaSerial);
 PersistedProperties props;
+PowerOnRestore powerRestore;
 
 bool hasLight = true;
 bool mcuBreakout = false;
@@ -83,6 +87,20 @@ const char* getResetReasonString() {
 // OTA state tracking
 volatile bool otaRunning = false;
 
+/********************* command de-duplication **************************/
+// The fan beeps once for every datapoint command it receives, so only send values
+// that differ from what the fan already has. These shadows track the last values
+// sent or reported by the MCU. They are invalidated on rollback and re-seeded from
+// the confirmed state on the next command.
+struct FanShadow   { bool valid; bool on; uint8_t speed; };
+struct LightShadow { bool valid; bool on; uint8_t brightness; uint8_t temp; };
+static FanShadow fanShadow     = {false, false, 0xFF};
+static LightShadow lightShadow = {false, false, 0xFF, 0xFF};
+
+// What the fan's controller itself last reported for power. The shadow above must start from this: the Zigbee
+// fan-mode attribute is not reliable for it, because the fan reports its remembered speed even while stopped.
+static struct { bool known; bool on; } mcuFan = {false, false};
+
 /********************* fan control callback functions **************************/
 void setFan(ZigbeeFanMode mode) {
   if (mcuBreakout) {
@@ -95,36 +113,43 @@ void setFan(ZigbeeFanMode mode) {
   statusLed.flashCommand();
 
   // Rollback callback - TuyaProtocol handles re-entry guard and MCU responding check
-  auto rollback = []() { zbFanControl.rollbackFanMode(); };
+  auto rollback = []() { fanShadow.valid = false; zbFanControl.rollbackFanMode(); };
 
+  // Work out the desired end state for this mode
+  bool wantOn = (mode != FAN_MODE_OFF);
+  int wantSpeed = -1;  // -1 = leave the speed alone
   switch (mode) {
-    case FAN_MODE_OFF:
-      tuya.queueCommand(DP_FAN_SWITCH, DP_TYPE_BOOL, 0, rollback);
-      Log::info("Fan mode set to OFF (0) by Zigbee");
-      break;
-    case FAN_MODE_LOW:
-      tuya.queueCommand(DP_FAN_SWITCH, DP_TYPE_BOOL, 1, rollback);
-      tuya.queueCommand(DP_FAN_SPEED, DP_TYPE_VALUE, FAN_SPEED_LOW_TUYA, rollback);
-      Log::info("Fan mode set to LOW (1) by Zigbee");
-      break;
-    case FAN_MODE_MEDIUM:
-      tuya.queueCommand(DP_FAN_SWITCH, DP_TYPE_BOOL, 1, rollback);
-      tuya.queueCommand(DP_FAN_SPEED, DP_TYPE_VALUE, FAN_SPEED_MEDIUM_TUYA, rollback);
-      Log::info("Fan mode set to MEDIUM (3) by Zigbee");
-      break;
-    case FAN_MODE_HIGH:
-      tuya.queueCommand(DP_FAN_SWITCH, DP_TYPE_BOOL, 1, rollback);
-      tuya.queueCommand(DP_FAN_SPEED, DP_TYPE_VALUE, FAN_SPEED_HIGH_TUYA, rollback);
-      Log::info("Fan mode set to HIGH (5) by Zigbee");
-      break;
-    case FAN_MODE_ON:
-      tuya.queueCommand(DP_FAN_SWITCH, DP_TYPE_BOOL, 1, rollback);
-      Log::info("Fan mode set to ON (4) by Zigbee");
-      break;
+    case FAN_MODE_OFF:                                         break;
+    case FAN_MODE_LOW:    wantSpeed = FAN_SPEED_LOW_TUYA;      break;
+    case FAN_MODE_MEDIUM: wantSpeed = FAN_SPEED_MEDIUM_TUYA;   break;
+    case FAN_MODE_HIGH:   wantSpeed = FAN_SPEED_HIGH_TUYA;     break;
+    case FAN_MODE_ON:                                          break;
     default:
       Log::error("Unhandled fan mode: %d", mode);
       return;
   }
+
+  if (!fanShadow.valid) {
+    fanShadow.on = mcuFan.known ? mcuFan.on : (zbFanControl.getConfirmedFanMode() != FAN_MODE_OFF);
+    fanShadow.speed = 0xFF;  // unknown - always send an explicit speed the first time
+    fanShadow.valid = true;
+  }
+
+  bool turningOn = wantOn && !fanShadow.on;
+
+  // Power: only when it actually changes
+  if (wantOn != fanShadow.on) {
+    tuya.queueCommand(DP_FAN_SWITCH, DP_TYPE_BOOL, wantOn ? 1 : 0, rollback);
+    fanShadow.on = wantOn;
+  }
+
+  // Speed: when turning on (explicit, as before) or when it changes
+  if (wantOn && wantSpeed >= 0 && (turningOn || wantSpeed != fanShadow.speed)) {
+    tuya.queueCommand(DP_FAN_SPEED, DP_TYPE_VALUE, wantSpeed, rollback);
+    fanShadow.speed = (uint8_t)wantSpeed;
+  }
+
+  Log::info("Fan mode set to %d by Zigbee", (int)mode);
 }
 
 // Fan direction control callback function
@@ -144,6 +169,56 @@ void setFanDirection(uint8_t direction) {
 
   Log::info("Fan direction set to %s (%d) by Zigbee",
     (direction == static_cast<uint8_t>(FanDirection::FORWARD)) ? "FORWARD" : "REVERSE", direction);
+}
+
+// Exact fan speed (0 = off, 1-5) from the custom "fan speed" attribute
+void setFanSpeedExact(uint8_t speed) {
+  if (mcuBreakout) {
+    Log::error("MCU breakout active — rejecting fan speed change, rolling back");
+    zbFanControl.rollbackFanSpeed();
+    return;
+  }
+  statusLed.flashCommand();
+
+  auto rollback = []() {
+    fanShadow.valid = false;
+    zbFanControl.rollbackFanSpeed();
+    zbFanControl.rollbackFanMode();
+  };
+
+  bool wantOn = (speed > 0);
+
+  if (!fanShadow.valid) {
+    fanShadow.on = mcuFan.known ? mcuFan.on : (zbFanControl.getConfirmedFanMode() != FAN_MODE_OFF);
+    fanShadow.speed = 0xFF;  // unknown - always send an explicit speed the first time
+    fanShadow.valid = true;
+  }
+
+  bool turningOn = wantOn && !fanShadow.on;
+
+  // Power: only when it actually changes
+  if (wantOn != fanShadow.on) {
+    tuya.queueCommand(DP_FAN_SWITCH, DP_TYPE_BOOL, wantOn ? 1 : 0, rollback);
+    fanShadow.on = wantOn;
+  }
+
+  // Speed: when turning on or when it changes
+  if (wantOn && (turningOn || speed != fanShadow.speed)) {
+    tuya.queueCommand(DP_FAN_SPEED, DP_TYPE_VALUE, speed, rollback);
+    fanShadow.speed = speed;
+  }
+
+  Log::info("Fan speed set to %d by Zigbee (exact)", speed);
+}
+
+// Power-on behaviour chosen from Zigbee2MQTT (which: 0 = light, 1 = fan)
+void onPowerOnSetting(uint8_t which, uint8_t value) {
+  if (which == 0) {
+    powerRestore.setLightMode(value);
+  } else {
+    powerRestore.setFanMode(value);
+  }
+  Log::info("Power-on %s behaviour set to %d by Zigbee", which == 0 ? "light" : "fan", value);
 }
 
 /********************* light control callback functions **************************/
@@ -176,20 +251,38 @@ void setLight(bool on, uint8_t level, uint16_t colourTempMired) {
   statusLed.flashCommand();
 
   // Rollback callback - TuyaProtocol handles re-entry guard and MCU responding check
-  auto rollback = []() { zbLight.rollback(); };
+  auto rollback = []() { lightShadow.valid = false; zbLight.rollback(); };
+
+  // Desired end state, converted to the MCU's units
+  uint8_t wantBrightness = zigbeeBrightnessToTuya(level);
+  uint8_t wantTemp = static_cast<uint8_t>(miredToTuyaColourTemp(colourTempMired));
+
+  if (!lightShadow.valid) {
+    lightShadow.on = zbLight.getConfirmedLightState();
+    lightShadow.brightness = zigbeeBrightnessToTuya(zbLight.getConfirmedLightLevel());
+    lightShadow.temp = static_cast<uint8_t>(miredToTuyaColourTemp(zbLight.getConfirmedColorTemp()));
+    lightShadow.valid = true;
+  }
 
   if (on) {
-    // Convert Zigbee brightness (0-254) to Tuya brightness (0-5)
-    uint8_t tuyaBrightness = zigbeeBrightnessToTuya(level);
-    // Convert mired to Tuya colour temp values
-    ColourTempLevel tuyaColourTemp = miredToTuyaColourTemp(colourTempMired);
-
-    // Switch on first so light responds immediately; adjust values after
-    tuya.queueCommand(DP_LIGHT_SWITCH, DP_TYPE_BOOL, 1, rollback);
-    tuya.queueCommand(DP_LIGHT_COLOUR_TEMP, DP_TYPE_ENUM, static_cast<uint8_t>(tuyaColourTemp));
-    tuya.queueCommand(DP_LIGHT_DIMMER, DP_TYPE_VALUE, tuyaBrightness);
-  } else {
+    // Switch on first so the light responds immediately; then only send what changed
+    if (!lightShadow.on) {
+      tuya.queueCommand(DP_LIGHT_SWITCH, DP_TYPE_BOOL, 1, rollback);
+      lightShadow.on = true;
+    }
+    if (wantTemp != lightShadow.temp) {
+      tuya.queueCommand(DP_LIGHT_COLOUR_TEMP, DP_TYPE_ENUM, wantTemp);
+      lightShadow.temp = wantTemp;
+    }
+    // Never send brightness 0: Zigbee drops the level to 0 when the light goes off, and a
+    // 0 sent on the next ON makes the MCU switch on at zero brightness (and beep again).
+    if (wantBrightness > 0 && wantBrightness != lightShadow.brightness) {
+      tuya.queueCommand(DP_LIGHT_DIMMER, DP_TYPE_VALUE, wantBrightness);
+      lightShadow.brightness = wantBrightness;
+    }
+  } else if (lightShadow.on) {
     tuya.queueCommand(DP_LIGHT_SWITCH, DP_TYPE_BOOL, 0, rollback);
+    lightShadow.on = false;
   }
 
   Log::info("Light set to %s, level %d, temp %d mired (%dK) by Zigbee",
@@ -198,6 +291,23 @@ void setLight(bool on, uint8_t level, uint16_t colourTempMired) {
 
 /********************* device status callback function **************************/
 void onDeviceStatus(uint8_t dpid, uint32_t value) {
+  powerRestore.track(dpid, value);  // remember the state for the power-on behaviour
+
+  // Keep the de-duplication shadows in step with what the MCU reports
+  // (covers changes made with the fan's own remote)
+  if (dpid == DP_FAN_SWITCH) {
+    mcuFan.known = true;
+    mcuFan.on = (value != 0);
+  }
+  switch (dpid) {
+    case DP_FAN_SWITCH:       if (fanShadow.valid)   fanShadow.on = (value != 0);                     break;
+    case DP_FAN_SPEED:        if (fanShadow.valid)   fanShadow.speed = (uint8_t)value;                break;
+    case DP_LIGHT_SWITCH:     if (lightShadow.valid) lightShadow.on = (value != 0);                   break;
+    case DP_LIGHT_DIMMER:     if (lightShadow.valid && value > 0) lightShadow.brightness = (uint8_t)value; break;
+    case DP_LIGHT_COLOUR_TEMP:if (lightShadow.valid) lightShadow.temp = (uint8_t)value;               break;
+    default: break;
+  }
+
   switch (dpid) {
     case DP_FAN_SWITCH:
     case DP_FAN_SPEED:
@@ -250,6 +360,7 @@ void setup() {
   // Connect to MCU - use persisted baud rate if available, otherwise negotiate
   bool mcuConnected = false;
   uint32_t storedRate = props.getMcuBaudRate();
+  if (storedRate == 0) storedRate = BAUD_RATE_PRIMARY;  // 9600 - the rate this fan uses; skips baud cycling
   if (storedRate > 0) {
     mcuConnected = tuya.connect(storedRate, checkSerialBreakout);
   } else {
@@ -274,6 +385,14 @@ void setup() {
     delay(50);
     tuya.queryProductInfo();
     tuya.waitForProductInfo(TUYA_COMMAND_TIMEOUT_MS);
+  }
+
+  // After a power cut the fan's controller starts with the fan stopped and the light on at its own default
+  // brightness and colour. Put things back as configured in SkyfanConfig.h (POWER_ON_LIGHT_MODE / POWER_ON_FAN_MODE).
+  // Only on a genuine power-on boot: a stick-only reset leaves the fan as it is.
+  powerRestore.begin();
+  if (mcuConnected && !mcuBreakout && esp_reset_reason() == ESP_RST_POWERON) {
+    powerRestore.restore(tuya);
   }
 
   // Resolve product ID: NVS cache takes precedence, MCU value used to populate or detect mismatch
@@ -323,6 +442,9 @@ void setup() {
   // Set callback functions for fan and light control
   zbFanControl.onFanModeChange(setFan);
   zbFanControl.onFanDirectionChange(setFanDirection);
+  zbFanControl.onFanSpeedChange(setFanSpeedExact);
+  zbFanControl.onPowerOnChange(onPowerOnSetting);
+  zbFanControl.setInitialPowerOn(powerRestore.getLightMode(), powerRestore.getFanMode());
   if (hasLight) {
     zbLight.onLightChangeTemp(setLight);
   }
@@ -369,7 +491,7 @@ void setup() {
     if (factoryResetButton.wasLongPressed()) {
       Serial.println();
       Log::info("Factory reset requested during connection");
-      props.clearAll();
+      props.clearAll(); powerRestore.clear();
       cleanupAllResources();
       delay(FACTORY_RESET_DELAY_MS);
       Zigbee.factoryReset();
@@ -409,7 +531,7 @@ void loop() {
     if (c == 's' || c == 'S') {
       props.dumpAll();
     } else if (c == 'c' || c == 'C') {
-      props.clearAll();
+      props.clearAll(); powerRestore.clear();
       Log::info("All persisted data cleared");
     } else if (c == 'l' || c == 'L') {
 #ifdef __BOOT_LOG__
@@ -419,7 +541,7 @@ void loop() {
 #endif
     } else if (c == 'r' || c == 'R') {
       Log::info("Factory reset requested via serial");
-      props.clearAll();
+      props.clearAll(); powerRestore.clear();
       cleanupAllResources();
       delay(FACTORY_RESET_DELAY_MS);
       Zigbee.factoryReset();
@@ -430,7 +552,19 @@ void loop() {
   if (!mcuBreakout) {
     tuya.setRadioConnected(Zigbee.connected());
     tuya.update();
+
+    // Ask the MCU for its full state every few seconds while nothing else is happening, so changes
+    // made with the fan's own remote are picked up even if the MCU does not announce them.
+    static unsigned long lastPollMs = 0;
+    if (TUYA_STATE_POLL_INTERVAL_MS > 0 && Zigbee.connected() && tuya.isIdle() &&
+        (millis() - lastPollMs) >= TUYA_STATE_POLL_INTERVAL_MS) {
+      lastPollMs = millis();
+      tuya.sendDatapointQuery();
+    }
   }
+
+  // Write a settled change of fan/light state to flash (for the power-on behaviour)
+  powerRestore.update();
 
   // Update button state (non-blocking)
   factoryResetButton.update();
@@ -445,7 +579,7 @@ void loop() {
       Log::error("OTA in progress - factory reset blocked");
     } else {
       Log::info("Factory reset requested - rebooting in 1s");
-      props.clearAll();
+      props.clearAll(); powerRestore.clear();
       cleanupAllResources();
       delay(FACTORY_RESET_DELAY_MS);
       Zigbee.factoryReset();

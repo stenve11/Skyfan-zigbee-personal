@@ -163,7 +163,8 @@ void SkyfanZigbeeLight::handleStatusUpdate(uint8_t dpid, uint32_t value) {
 
     case DP_LIGHT_COLOUR_TEMP: {
       uint8_t colourTempValue = static_cast<uint8_t>(value);
-      if (colourTempValue > static_cast<uint8_t>(ColourTempLevel::COOL)) {
+      // Valid values are COOL (0), NATURAL (1) and WARM (2); the largest is WARM
+      if (colourTempValue > static_cast<uint8_t>(ColourTempLevel::WARM)) {
         Log::error("Invalid light colour temperature status received: %d", colourTempValue);
         return;
       }
