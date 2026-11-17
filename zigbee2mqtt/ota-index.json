@@ -1,1 +1,9 @@
-[]
+[
+  {
+    "url": "https://github.com/stenve11/Skyfan-zigbee-personal/releases/download/v0.1.0/skyfan-zigbee.ota",
+    "manufacturerCode": 6168,
+    "imageType": 1,
+    "fileVersion": 4321280,
+    "modelId": "Ventair Skyfan/Light ZB Adaptor"
+  }
+]
