@@ -360,6 +360,7 @@ void otaStateCallback(bool otaActive) {
 void setup() {
   Log::begin(DEBUG_SERIAL_BAUD_RATE);  // USB Serial for debug output
   Log::info("Skyfan Zigbee Controller starting...");
+  Log::info("Firmware %s (OTA file version 0x%08X)", FIRMWARE_VERSION, (unsigned int)OTA_FILE_VERSION);
   Log::info("Reset reason: %s", getResetReasonString());
 
   // Load persisted properties from NVS
