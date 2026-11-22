@@ -1,0 +1,63 @@
+# Create a release tag from the GitHub Actions page (no git needed)
+#
+# Actions -> "Create release tag" -> Run workflow -> type a version such as v0.2.0-alpha.2
+#
+# It tags the latest commit on main and then starts the "Build and Release Firmware" workflow on that tag,
+# which builds the firmware, publishes the release and adds it to zigbee2mqtt/ota-index.json.
+#
+# Tags pushed with the built-in token do not start other workflows, so the build is started explicitly.
+
+name: Create release tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. v0.2.0-alpha.2 or v0.2.0 (tags the latest commit on main)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  tag:
+    name: Tag main and start the release build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Validate the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]; then
+            echo "::error::Invalid version '$VERSION'. Use v1.2.3, v1.2.3-alpha.1, v1.2.3-beta.1 or v1.2.3-rc.1"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
+            echo "::error::Tag $VERSION already exists. Pick a new version number."
+            exit 1
+          fi
+
+      - name: Create and push the tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$VERSION"
+          git push origin "refs/tags/$VERSION"
+          echo "Tagged $(git rev-parse --short HEAD) as $VERSION"
+
+      - name: Start the release build on the tag
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run build-release.yml --ref "$VERSION"
+          echo "Release build started for $VERSION. Watch it under the Actions tab."
