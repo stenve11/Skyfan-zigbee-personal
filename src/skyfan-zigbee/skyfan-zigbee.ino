@@ -211,17 +211,51 @@ void setFanSpeedExact(uint8_t speed) {
   Log::info("Fan speed set to %d by Zigbee (exact)", speed);
 }
 
+// The Zigbee stack changes the Level attribute as a side effect of On/Off commands (On sets 255, Off sets 0)
+// and tells us about it. Those changes are not speed requests: acting on them made every On or Off send
+// extra speed commands, and the fan beeps once for each. So a level change is held for a short time, and a
+// power command arriving in that time cancels it. A level of 255 is not a valid level (the range is 0-254),
+// so it is always ignored. Level and power callbacks run on the Zigbee task and the held value is applied
+// from loop(), hence the lock.
+#define REMOTE_LEVEL_SETTLE_MS 150
+static portMUX_TYPE remoteLevelMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile int16_t pendingLevel = -1;
+static volatile uint32_t pendingLevelSince = 0;
+
 // Bound switch, remote or group: On/Off command. On resumes the fan's last speed, Off stops it.
 void setFanPower(bool on) {
+  portENTER_CRITICAL(&remoteLevelMux);
+  pendingLevel = -1;  // the level change that came with this command is not a speed request
+  portEXIT_CRITICAL(&remoteLevelMux);
   Log::info("Fan %s by bound controller", on ? "on" : "off");
   setFanSpeedExact(on ? zbFanControl.getLastSpeed() : 0);
 }
 
 // Bound dial or remote: Level Control (0-254) picks the speed, 0 stops the fan.
-// The fan's de-duplication below only sends a command when the resulting speed changes, so a Move
-// (hold) that sweeps the level sends at most one command per speed.
+// The value is only held here; applyPendingLevel() acts on it once it has settled.
 void setFanLevel(uint8_t level) {
-  setFanSpeedExact(levelToFanSpeed(level));
+  portENTER_CRITICAL(&remoteLevelMux);
+  if (pendingLevel < 0) pendingLevelSince = millis();  // time from the first change, so a Move (hold) still updates steadily
+  pendingLevel = level;
+  portEXIT_CRITICAL(&remoteLevelMux);
+}
+
+// Called from loop(). The fan's de-duplication only sends a command when the resulting speed changes, so a
+// Move (hold) that sweeps the level sends at most one command per speed.
+void applyPendingLevel() {
+  int16_t level = -1;
+  portENTER_CRITICAL(&remoteLevelMux);
+  if (pendingLevel >= 0 && (millis() - pendingLevelSince) >= REMOTE_LEVEL_SETTLE_MS) {
+    level = pendingLevel;
+    pendingLevel = -1;
+  }
+  portEXIT_CRITICAL(&remoteLevelMux);
+  if (level < 0) return;
+  if (level == 255) {
+    Log::debug("Ignoring level 255 (not a speed request)");
+    return;
+  }
+  setFanSpeedExact(levelToFanSpeed(static_cast<uint8_t>(level)));
 }
 
 // Power-on behaviour chosen from Zigbee2MQTT (which: 0 = light, 1 = fan)
@@ -542,6 +576,8 @@ void setup() {
 }
 
 void loop() {
+  applyPendingLevel();
+
   if (Serial.available()) {
     char c = Serial.read();
     if (c == 's' || c == 'S') {
