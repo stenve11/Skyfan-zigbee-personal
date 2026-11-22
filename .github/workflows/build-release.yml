@@ -510,7 +510,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Add new release to ota-index.json
+          # Point ota-index.json at the new release
           OTA_INDEX="zigbee2mqtt/ota-index.json"
           TAG="${{ github.ref_name }}"
           OTA_VERSION=${{ needs.prepare.outputs.ota_version_decimal }}
@@ -527,15 +527,14 @@ jobs:
           EOF
           )
 
-          # Read existing index, append new entry, write back
-          # Using jq to properly handle JSON
-          if command -v jq &> /dev/null; then
-            jq --argjson entry "$NEW_ENTRY" '. += [$entry]' "$OTA_INDEX" > tmp.json && mv tmp.json "$OTA_INDEX"
-          else
+          # Replace the index with just the new release. Zigbee2MQTT does not document how it chooses
+          # between several entries for the same device, and with older releases listed it kept offering
+          # the oldest one, so the index only ever holds the newest release.
+          if ! command -v jq &> /dev/null; then
             echo "jq not available, installing..."
             sudo apt-get update && sudo apt-get install -y jq
-            jq --argjson entry "$NEW_ENTRY" '. += [$entry]' "$OTA_INDEX" > tmp.json && mv tmp.json "$OTA_INDEX"
           fi
+          jq -n --argjson entry "$NEW_ENTRY" '[$entry]' > tmp.json && mv tmp.json "$OTA_INDEX"
 
           echo "Updated $OTA_INDEX with entry for $TAG"
           cat "$OTA_INDEX"
@@ -557,5 +556,5 @@ jobs:
 
           git add zigbee2mqtt/ota-index.json
           # [skip ci] prevents this commit from triggering another workflow run
-          git commit -m "chore: add ${{ github.ref_name }} to OTA index [skip ci]" || echo "No changes to commit"
+          git commit -m "chore: point OTA index at ${{ github.ref_name }} [skip ci]" || echo "No changes to commit"
           git push origin main
