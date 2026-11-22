@@ -45,6 +45,15 @@ SkyfanZigbeeFanControl::SkyfanZigbeeFanControl(uint8_t endpoint) : ZigbeeEP(endp
   esp_zb_cluster_list_add_identify_cluster(_cluster_list, esp_zb_identify_cluster_create(NULL), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
   esp_zb_cluster_list_add_fan_control_cluster(_cluster_list, esp_zb_fan_control_cluster_create(NULL), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
+  // On/Off, Level Control and Groups so a bound switch, dial or group can drive the fan:
+  // On/Off turns it on (at its last speed) or off, Level Control picks the speed (0 = off, 1-254 = speeds 1-5).
+  esp_zb_groups_cluster_cfg_t groupsCfg = {.groups_name_support_id = ESP_ZB_ZCL_GROUPS_NAME_SUPPORT_DEFAULT_VALUE};
+  esp_zb_cluster_list_add_groups_cluster(_cluster_list, esp_zb_groups_cluster_create(&groupsCfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+  esp_zb_on_off_cluster_cfg_t onOffCfg = {.on_off = ESP_ZB_ZCL_ON_OFF_ON_OFF_DEFAULT_VALUE};
+  esp_zb_cluster_list_add_on_off_cluster(_cluster_list, esp_zb_on_off_cluster_create(&onOffCfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+  esp_zb_level_cluster_cfg_t levelCfg = {.current_level = ESP_ZB_ZCL_LEVEL_CONTROL_CURRENT_LEVEL_DEFAULT_VALUE};
+  esp_zb_cluster_list_add_level_cluster(_cluster_list, esp_zb_level_cluster_create(&levelCfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
   // Set endpoint config (copied exactly from ZigbeeFanControl)
   _ep_config = {
     .endpoint = _endpoint, .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID, .app_device_id = ESP_ZB_HA_HEATING_COOLING_UNIT_DEVICE_ID, .app_device_version = 0
@@ -65,6 +74,36 @@ void SkyfanZigbeeFanControl::onFanModeChange(void (*callback)(ZigbeeFanMode mode
 
 void SkyfanZigbeeFanControl::onFanSpeedChange(void (*callback)(uint8_t speed)) {
   fanSpeedCallback = callback;
+}
+
+void SkyfanZigbeeFanControl::onRemotePowerChange(void (*callback)(bool on)) {
+  remotePowerCallback = callback;
+}
+
+void SkyfanZigbeeFanControl::onRemoteLevelChange(void (*callback)(uint8_t level)) {
+  remoteLevelCallback = callback;
+}
+
+// Keep the On/Off and Level attributes matching the fan. The stack acts on them when a command arrives
+// (a Toggle flips the stored On/Off value), so a change made with the fan's own remote or from Zigbee2MQTT
+// must show up here too. The level holds the remembered speed while the fan is stopped, like a light's brightness.
+void SkyfanZigbeeFanControl::syncRemoteControl(bool on, uint8_t speed) {
+  uint8_t levelSpeed = on ? speed : _lastMcuSpeed;
+  bool levelNeeded = (levelSpeed > 0 && levelToFanSpeed(_remoteLevel) != levelSpeed);
+  if (_remoteOn == on && !levelNeeded) return;
+
+  ZbLockGuard guard;
+  if (_remoteOn != on) {
+    esp_zb_zcl_status_t ret = esp_zb_zcl_set_attribute_val(_endpoint, ESP_ZB_ZCL_CLUSTER_ID_ON_OFF, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                                           ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID, (void *)&on, false);
+    if (ret == ESP_ZB_ZCL_STATUS_SUCCESS) _remoteOn = on;
+  }
+  if (levelNeeded) {
+    uint8_t level = fanSpeedToLevel(levelSpeed);
+    esp_zb_zcl_status_t ret = esp_zb_zcl_set_attribute_val(_endpoint, ESP_ZB_ZCL_CLUSTER_ID_LEVEL_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                                           ESP_ZB_ZCL_ATTR_LEVEL_CONTROL_CURRENT_LEVEL_ID, (void *)&level, false);
+    if (ret == ESP_ZB_ZCL_STATUS_SUCCESS) _remoteLevel = level;
+  }
 }
 
 void SkyfanZigbeeFanControl::setInitialPowerOn(uint8_t light, uint8_t fan) {
@@ -359,6 +398,30 @@ void SkyfanZigbeeFanControl::zbAttributeSet(const esp_zb_zcl_set_attr_value_mess
     } else {
       Log::debug("Received message ignored - attribute ID %d not supported for Fan Control", message->attribute.id);
     }
+  } else if (message->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF) {
+    // On, Off or Toggle from a bound switch, remote or group (the stack has already updated the attribute)
+    if (message->attribute.id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID && message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_BOOL) {
+      bool on = *(bool *)message->attribute.data.value;
+      _remoteOn = on;
+      Log::debug("Bound On/Off command: %s", on ? "on" : "off");
+      if (remotePowerCallback) {
+        remotePowerCallback(on);
+      }
+    } else {
+      Log::debug("Received message ignored - attribute ID %d not supported for On/Off", message->attribute.id);
+    }
+  } else if (message->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_LEVEL_CONTROL) {
+    // Move/Step/Move-to-level from a bound dial or remote; the stack updates the level and tells us each change
+    if (message->attribute.id == ESP_ZB_ZCL_ATTR_LEVEL_CONTROL_CURRENT_LEVEL_ID && message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U8) {
+      uint8_t level = *(uint8_t *)message->attribute.data.value;
+      _remoteLevel = level;
+      Log::debug("Bound level change: %d", level);
+      if (remoteLevelCallback) {
+        remoteLevelCallback(level);
+      }
+    } else {
+      Log::debug("Received message ignored - attribute ID %d not supported for Level Control", message->attribute.id);
+    }
   } else {
     Log::debug("Received message ignored - cluster ID 0x%04X not supported", message->info.cluster);
   }
@@ -598,6 +661,7 @@ void SkyfanZigbeeFanControl::handleStatusUpdate(uint8_t dpid, uint32_t value) {
         setFanSpeedAttribute(exactSpeed);
         confirmFanSpeed(exactSpeed);
         if (speedChanged) reportFanSpeed();
+        syncRemoteControl(fanOn, exactSpeed);
       }
 
       confirmFanMode(_current_fan_mode);
@@ -630,6 +694,7 @@ void SkyfanZigbeeFanControl::handleStatusUpdate(uint8_t dpid, uint32_t value) {
       setFanSpeedAttribute(exactSpeed);
       confirmFanSpeed(exactSpeed);
       if (speedChanged) reportFanSpeed();
+      syncRemoteControl(_fanPowerOn, exactSpeed);
 
       confirmFanMode(_current_fan_mode);
       Log::info("Fan speed set to %d by Skyfan", speed);

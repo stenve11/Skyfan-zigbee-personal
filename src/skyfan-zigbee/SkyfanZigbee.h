@@ -35,6 +35,8 @@ private:
   void (*fanModeCallback)(ZigbeeFanMode mode) = nullptr;
   void (*fanSpeedCallback)(uint8_t speed) = nullptr;
   void (*powerOnCallback)(uint8_t which, uint8_t value) = nullptr;  // which: 0 = light, 1 = fan
+  void (*remotePowerCallback)(bool on) = nullptr;       // On/Off command from a bound switch, remote or group
+  void (*remoteLevelCallback)(uint8_t level) = nullptr; // Level Control change (0-254) from a bound dial/remote
   uint8_t _initialPowerOnLight = 0;
   uint8_t _initialPowerOnFan = 0;
   esp_zb_attribute_list_t *customCluster = nullptr;
@@ -50,6 +52,12 @@ private:
   uint8_t confirmedFanSpeed = 0;
   bool _fanPowerOn = false;       // last power state reported by the MCU
   uint8_t _lastMcuSpeed = 1;      // last non-zero speed reported by the MCU
+
+  // On/Off and Level Control attributes on the fan endpoint, for bound switches, remotes and groups.
+  // The Zigbee stack changes them itself when a command arrives (a Toggle works from the stored value),
+  // so they are kept in step with the fan's real state. Local copies avoid reading them back.
+  bool _remoteOn = false;
+  uint8_t _remoteLevel = 255;
 
 public:
   SkyfanZigbeeFanControl(uint8_t endpoint);
@@ -69,6 +77,16 @@ public:
   // Power-on behaviour settings (0 default, 1 previous, 2 on, 3 off): starting values, and a callback for changes from Zigbee
   void setInitialPowerOn(uint8_t light, uint8_t fan);   // call before createCustomCluster()
   void onPowerOnChange(void (*callback)(uint8_t which, uint8_t value));
+
+  // Bound-controller support: callbacks for On/Off commands and Level Control changes on the fan endpoint
+  void onRemotePowerChange(void (*callback)(bool on));
+  void onRemoteLevelChange(void (*callback)(uint8_t level));
+
+  // Last non-zero speed the fan reported; what an On command resumes at
+  uint8_t getLastSpeed() const { return _lastMcuSpeed; }
+
+  // Mirror the fan's real state into the On/Off and Level attributes (call after an MCU status update)
+  void syncRemoteControl(bool on, uint8_t speed);
 
   // Get current fan mode
   ZigbeeFanMode getFanMode() const { return _current_fan_mode; }

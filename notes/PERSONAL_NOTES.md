@@ -44,8 +44,8 @@ Based on upstream commit 25e56eb.
 
 ## Ideas / TODO
 - Offline control (works with HA/network down): fan is kept on mains; bind a wall controller via Zigbee.
-  Shelly Gen4 1L / i4 can bind momentary-input toggle to groups (2PM Gen4 not documented). Light toggle works via group;
-  fan needs firmware work: bindable On/Off + Level endpoint for the fan.
+  Shelly Gen4 1L / i4 can bind momentary-input toggle to groups (2PM Gen4 not documented). Light toggle works via group.
+  Fan endpoint now has On/Off + Level Control + Groups (see "Bindable fan" below) - untested on hardware.
 - OTA helper script (build + version bump + local index in one command).
 - Real-world power-cut restore test result: pending.
 - ESPHome considered: Zigbee support immature, Wi-Fi OTA only, not better for offline.
@@ -59,3 +59,15 @@ Based on upstream commit 25e56eb.
 - Repo must be PUBLIC for Z2M to download without a login.
 - Tag versions map to OTA numbers (v0.1.0 = 4321280) - always higher than the early local test builds (1-9).
 - Workflow pinned to esp32 core 3.3.12 to match local builds.
+
+## Bindable fan (fan endpoint 1: On/Off + Level Control + Groups)
+- On/Off: On resumes the fan's last speed (MCU-reported), Off stops it, Toggle works from the stored attribute.
+- Level Control 0-254 -> speed: 1-51 = 1, 52-102 = 2, 103-153 = 3, 154-204 = 4, 205-254 = 5; level 0 = off.
+  A speed is stored as the middle of its band (26/77/128/179/230) so small steps don't skip a speed.
+- Attributes are mirrored from the fan's real state after every MCU status update (RF remote, Z2M and bound
+  commands all end up consistent). Level keeps the remembered speed while the fan is stopped.
+- Commands go through setFanSpeedExact(), so the existing shadow de-dupe applies: a hold/Move sends at most one
+  command per speed.
+- After flashing, Z2M must re-interview the device (device page -> Interview) so the new clusters show up in the bind UI.
+- Binding: remote (output genOnOff / genLevelCtrl) -> stick endpoint 1, or a group containing endpoint 1.
+- Not in the Z2M converter: the new clusters are not reported to the coordinator, only used for commands.
