@@ -226,6 +226,22 @@ inline bool isValidTuyaFanSpeed(uint8_t speed) {
   return isInRange(speed, static_cast<uint8_t>(TUYA_FAN_SPEED_MIN), static_cast<uint8_t>(TUYA_FAN_SPEED_MAX));
 }
 
+// Level Control (0-254) <-> fan speed (0-5) for remotes bound to the fan endpoint.
+// Each speed owns a band of levels: 1-51 -> speed 1, 52-102 -> 2, 103-153 -> 3, 154-204 -> 4, 205-254 -> 5.
+// Level 0 means off. A speed is stored as the middle of its band, so a few small steps up or down
+// from there do not jump straight past the next speed.
+inline uint8_t levelToFanSpeed(uint8_t level) {
+  if (level == 0) return 0;
+  uint16_t speed = (static_cast<uint16_t>(level) + 50) / 51;
+  return (speed > TUYA_FAN_SPEED_MAX) ? static_cast<uint8_t>(TUYA_FAN_SPEED_MAX) : static_cast<uint8_t>(speed);
+}
+
+inline uint8_t fanSpeedToLevel(uint8_t speed) {
+  if (speed == 0) return 0;
+  if (speed > TUYA_FAN_SPEED_MAX) speed = TUYA_FAN_SPEED_MAX;
+  return static_cast<uint8_t>(speed * 51 - 25);  // 26, 77, 128, 179, 230
+}
+
 // Validate Tuya brightness (0-5 integer range)
 inline bool isValidTuyaBrightness(uint8_t brightness) {
   return isInRange(brightness, static_cast<uint8_t>(TUYA_BRIGHTNESS_MIN), static_cast<uint8_t>(TUYA_BRIGHTNESS_MAX));

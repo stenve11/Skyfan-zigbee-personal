@@ -211,6 +211,19 @@ void setFanSpeedExact(uint8_t speed) {
   Log::info("Fan speed set to %d by Zigbee (exact)", speed);
 }
 
+// Bound switch, remote or group: On/Off command. On resumes the fan's last speed, Off stops it.
+void setFanPower(bool on) {
+  Log::info("Fan %s by bound controller", on ? "on" : "off");
+  setFanSpeedExact(on ? zbFanControl.getLastSpeed() : 0);
+}
+
+// Bound dial or remote: Level Control (0-254) picks the speed, 0 stops the fan.
+// The fan's de-duplication below only sends a command when the resulting speed changes, so a Move
+// (hold) that sweeps the level sends at most one command per speed.
+void setFanLevel(uint8_t level) {
+  setFanSpeedExact(levelToFanSpeed(level));
+}
+
 // Power-on behaviour chosen from Zigbee2MQTT (which: 0 = light, 1 = fan)
 void onPowerOnSetting(uint8_t which, uint8_t value) {
   if (which == 0) {
@@ -443,6 +456,8 @@ void setup() {
   zbFanControl.onFanModeChange(setFan);
   zbFanControl.onFanDirectionChange(setFanDirection);
   zbFanControl.onFanSpeedChange(setFanSpeedExact);
+  zbFanControl.onRemotePowerChange(setFanPower);
+  zbFanControl.onRemoteLevelChange(setFanLevel);
   zbFanControl.onPowerOnChange(onPowerOnSetting);
   zbFanControl.setInitialPowerOn(powerRestore.getLightMode(), powerRestore.getFanMode());
   if (hasLight) {
