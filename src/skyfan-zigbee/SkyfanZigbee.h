@@ -59,15 +59,6 @@ private:
   bool _remoteOn = false;
   uint8_t _remoteLevel = 255;
 
-  // Values written by syncRemoteControl itself. The stack reports a local write back through the same
-  // attribute-set callback as a command from a bound controller, so a callback that matches a value we just
-  // wrote is our own echo and must not be acted on (it would turn the fan back on after an Off).
-  static constexpr uint32_t ECHO_WINDOW_MS = 1000;
-  volatile int8_t _echoOn = -1;          // -1 = none, else the On/Off value we wrote
-  volatile uint32_t _echoOnAt = 0;
-  volatile int16_t _echoLevel = -1;      // -1 = none, else the level we wrote
-  volatile uint32_t _echoLevelAt = 0;
-
 public:
   SkyfanZigbeeFanControl(uint8_t endpoint);
   
