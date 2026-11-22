@@ -94,12 +94,16 @@ void SkyfanZigbeeFanControl::syncRemoteControl(bool on, uint8_t speed) {
 
   ZbLockGuard guard;
   if (_remoteOn != on) {
+    _echoOn = on ? 1 : 0;  // set before the write: the callback can fire during it
+    _echoOnAt = millis();
     esp_zb_zcl_status_t ret = esp_zb_zcl_set_attribute_val(_endpoint, ESP_ZB_ZCL_CLUSTER_ID_ON_OFF, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
                                                            ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID, (void *)&on, false);
     if (ret == ESP_ZB_ZCL_STATUS_SUCCESS) _remoteOn = on;
   }
   if (levelNeeded) {
     uint8_t level = fanSpeedToLevel(levelSpeed);
+    _echoLevel = level;
+    _echoLevelAt = millis();
     esp_zb_zcl_status_t ret = esp_zb_zcl_set_attribute_val(_endpoint, ESP_ZB_ZCL_CLUSTER_ID_LEVEL_CONTROL, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
                                                            ESP_ZB_ZCL_ATTR_LEVEL_CONTROL_CURRENT_LEVEL_ID, (void *)&level, false);
     if (ret == ESP_ZB_ZCL_STATUS_SUCCESS) _remoteLevel = level;
@@ -403,6 +407,11 @@ void SkyfanZigbeeFanControl::zbAttributeSet(const esp_zb_zcl_set_attr_value_mess
     if (message->attribute.id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID && message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_BOOL) {
       bool on = *(bool *)message->attribute.data.value;
       _remoteOn = on;
+      if (_echoOn == (on ? 1 : 0) && (millis() - _echoOnAt) < ECHO_WINDOW_MS) {
+        _echoOn = -1;
+        Log::debug("On/Off %s is our own sync, ignored", on ? "on" : "off");
+        return;
+      }
       Log::debug("Bound On/Off command: %s", on ? "on" : "off");
       if (remotePowerCallback) {
         remotePowerCallback(on);
@@ -415,6 +424,11 @@ void SkyfanZigbeeFanControl::zbAttributeSet(const esp_zb_zcl_set_attr_value_mess
     if (message->attribute.id == ESP_ZB_ZCL_ATTR_LEVEL_CONTROL_CURRENT_LEVEL_ID && message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U8) {
       uint8_t level = *(uint8_t *)message->attribute.data.value;
       _remoteLevel = level;
+      if (_echoLevel == level && (millis() - _echoLevelAt) < ECHO_WINDOW_MS) {
+        _echoLevel = -1;
+        Log::debug("Level %d is our own sync, ignored", level);
+        return;
+      }
       Log::debug("Bound level change: %d", level);
       if (remoteLevelCallback) {
         remoteLevelCallback(level);
