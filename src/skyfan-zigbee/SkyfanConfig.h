@@ -296,10 +296,15 @@ inline uint16_t tuyaColourTempToKelvin(ColourTempLevel colourTemp) {
 // === Range Mapping Functions ===
 
 // Map Zigbee brightness to Tuya brightness with validation
-// Rounds to nearest so that each level's own reported Zigbee value maps back to the same level
+// Rounds to nearest so that each level's own reported Zigbee value maps back to the same level.
+// Any non-zero level is at least the lowest step (1): the light has only five steps, and without this
+// the lowest 10% of a slider (levels 1-25) rounded to 0, which is never sent, so nothing changed.
+// Level 0 stays 0 (the callers treat it as "no brightness request").
 inline uint8_t zigbeeBrightnessToTuya(uint8_t zigbeeBrightness) {
   uint8_t clamped = clamp(zigbeeBrightness, static_cast<uint8_t>(ZIGBEE_BRIGHTNESS_MIN), static_cast<uint8_t>(ZIGBEE_BRIGHTNESS_MAX));
-  return (uint8_t)(((uint16_t)clamped * TUYA_BRIGHTNESS_MAX + ZIGBEE_BRIGHTNESS_MAX / 2) / ZIGBEE_BRIGHTNESS_MAX);
+  uint8_t step = (uint8_t)(((uint16_t)clamped * TUYA_BRIGHTNESS_MAX + ZIGBEE_BRIGHTNESS_MAX / 2) / ZIGBEE_BRIGHTNESS_MAX);
+  if (clamped > 0 && step == 0) step = 1;
+  return step;
 }
 
 // Map Tuya brightness to Zigbee brightness with validation
