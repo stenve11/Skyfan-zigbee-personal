@@ -258,6 +258,29 @@ void applyPendingLevel() {
   setFanSpeedExact(levelToFanSpeed(static_cast<uint8_t>(level)));
 }
 
+// The light has five brightness steps. When a requested level does not match a step's own level (a slider at
+// 1%, say), the MCU is either sent the nearest step or, if it is already on that step, sent nothing, and in
+// the second case it never reports back, so the slider would stay where it was dragged. The level is therefore
+// snapped to the step's own level once the requests have settled, which also moves the slider in Home Assistant.
+#define LIGHT_LEVEL_SNAP_SETTLE_MS 400
+static volatile int16_t pendingLightSnap = -1;       // Zigbee level to report, or -1 for none
+static volatile uint32_t pendingLightSnapSince = 0;  // time of the latest light request
+
+void applyPendingLightSnap() {
+  int16_t level = -1;
+  portENTER_CRITICAL(&remoteLevelMux);
+  if (pendingLightSnap >= 0 && (millis() - pendingLightSnapSince) >= LIGHT_LEVEL_SNAP_SETTLE_MS) {
+    level = pendingLightSnap;
+    pendingLightSnap = -1;
+  }
+  portEXIT_CRITICAL(&remoteLevelMux);
+  if (level < 0) return;
+  zbLight.setLightLevelDirect(static_cast<uint8_t>(level));
+  zbLight.confirmLightLevel(static_cast<uint8_t>(level));
+  zbLight.reportLightLevel();
+  Log::info("Light level snapped to step level %d", level);
+}
+
 // Power-on behaviour chosen from Zigbee2MQTT (which: 0 = light, 1 = fan)
 void onPowerOnSetting(uint8_t which, uint8_t value) {
   if (which == 0) {
@@ -331,6 +354,17 @@ void setLight(bool on, uint8_t level, uint16_t colourTempMired) {
     tuya.queueCommand(DP_LIGHT_SWITCH, DP_TYPE_BOOL, 0, rollback);
     lightShadow.on = false;
   }
+
+  // Queue a snap of the Zigbee level to the step's own level when they differ (see applyPendingLightSnap).
+  // Off, or level 0, queues nothing; a newer request replaces an older one and restarts the settle time.
+  portENTER_CRITICAL(&remoteLevelMux);
+  if (on && wantBrightness > 0 && level != tuyaBrightnessToZigbee(wantBrightness)) {
+    pendingLightSnap = tuyaBrightnessToZigbee(wantBrightness);
+    pendingLightSnapSince = millis();
+  } else {
+    pendingLightSnap = -1;
+  }
+  portEXIT_CRITICAL(&remoteLevelMux);
 
   Log::info("Light set to %s, level %d, temp %d mired (%dK) by Zigbee",
     on ? "ON" : "OFF", level, colourTempMired, miredToKelvin(colourTempMired));
@@ -577,6 +611,7 @@ void setup() {
 
 void loop() {
   applyPendingLevel();
+  applyPendingLightSnap();
 
   if (Serial.available()) {
     char c = Serial.read();
